@@ -41,7 +41,7 @@
     <script type="text/babel">
         const { useState, useEffect, useMemo } = React;
 
-        // --- Icons (SVG Components to avoid dependencies) ---
+        // --- Icons ---
         const IconTrophy = ({ className }) => (
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></svg>
         );
@@ -56,6 +56,10 @@
 
         const IconAlert = ({ className }) => (
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>
+        );
+
+        const IconGitBranch = ({ className }) => (
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
         );
 
         // --- Configuration ---
@@ -75,9 +79,22 @@
             12: 'D-Town Swirlies',
         };
 
+        // --- Helper: Find Team Name ---
+        const getTeamName = (idOrObj) => {
+            if (!idOrObj) return 'TBD';
+            if (typeof idOrObj === 'object') {
+                if (idOrObj.w) return `Winner of Match ${idOrObj.w}`;
+                if (idOrObj.l) return `Loser of Match ${idOrObj.l}`;
+                return 'TBD';
+            }
+            return TEAMS[idOrObj] || `Team ${idOrObj}`;
+        };
+
         // --- Data Hook ---
         const useSleeperData = () => {
             const [data, setData] = useState({});
+            const [brackets, setBrackets] = useState({ winners: [], losers: [] });
+            const [leagueSettings, setLeagueSettings] = useState(null);
             const [loading, setLoading] = useState(true);
             const [error, setError] = useState(null);
             const [currentNflWeek, setCurrentNflWeek] = useState(1);
@@ -86,17 +103,27 @@
                 setLoading(true);
                 setError(null);
                 try {
-                    // 1. Get current NFL state
+                    // 1. Fetch NFL State
                     const stateRes = await fetch('https://api.sleeper.app/v1/state/nfl');
-                    if (!stateRes.ok) throw new Error('Failed to fetch NFL state');
                     const stateData = await stateRes.json();
-                    const currentWeek = stateData.week || 1;
-                    setCurrentNflWeek(currentWeek);
+                    setCurrentNflWeek(stateData.week || 1);
 
-                    // 2. Fetch all weeks (1-17)
-                    // We still fetch ALL data so the totals are correct
+                    // 2. Fetch League Info (for playoff start week)
+                    const leagueRes = await fetch(`https://api.sleeper.app/v1/league/${LEAGUE_ID}`);
+                    const leagueData = await leagueRes.json();
+                    setLeagueSettings(leagueData);
+
+                    // 3. Fetch Brackets
+                    const [winnersRes, losersRes] = await Promise.all([
+                        fetch(`https://api.sleeper.app/v1/league/${LEAGUE_ID}/winners_bracket`),
+                        fetch(`https://api.sleeper.app/v1/league/${LEAGUE_ID}/losers_bracket`)
+                    ]);
+                    const winnersBracket = await winnersRes.json();
+                    const losersBracket = await losersRes.json();
+                    setBrackets({ winners: winnersBracket, losers: losersBracket });
+
+                    // 4. Fetch Weekly Data (1-17)
                     const weeksToFetch = Array.from({ length: 17 }, (_, i) => i + 1);
-                    
                     const results = await Promise.all(
                         weeksToFetch.map(async (week) => {
                             try {
@@ -105,7 +132,6 @@
                                 const matchups = await res.json();
                                 return { week, matchups };
                             } catch (e) {
-                                console.warn(`Failed to fetch week ${week}`, e);
                                 return { week, matchups: [] };
                             }
                         })
@@ -117,9 +143,10 @@
                     });
 
                     setData(dataByWeek);
+
                 } catch (err) {
                     console.error(err);
-                    setError('Failed to load league data. Please try again.');
+                    setError('Failed to load league data.');
                 } finally {
                     setLoading(false);
                 }
@@ -129,26 +156,125 @@
                 fetchData();
             }, []);
 
-            return { data, loading, error, currentNflWeek, refresh: fetchData };
+            return { data, brackets, leagueSettings, loading, error, currentNflWeek, refresh: fetchData };
         };
 
-        // --- Main Component ---
+        // --- Components ---
+
+        const BracketMatchup = ({ match, data, playoffStartWeek }) => {
+            const weekNumber = playoffStartWeek + (match.r - 1);
+            const weekData = data[weekNumber] || [];
+
+            // Helper to get score and name
+            const getTeamInfo = (rosterIdRef) => {
+                let name = 'TBD';
+                let score = 0;
+                let isPlaceholder = true;
+
+                if (typeof rosterIdRef === 'number') {
+                    name = TEAMS[rosterIdRef] || `Team ${rosterIdRef}`;
+                    isPlaceholder = false;
+                    // Find actual score for this week
+                    const teamMatchup = weekData.find(m => m.roster_id === rosterIdRef);
+                    if (teamMatchup) {
+                        score = teamMatchup.points || 0;
+                    }
+                } else if (rosterIdRef) {
+                    if (rosterIdRef.w) name = `Winner of M${rosterIdRef.w}`;
+                    if (rosterIdRef.l) name = `Loser of M${rosterIdRef.l}`;
+                    if (rosterIdRef.p) name = `${rosterIdRef.p}th Place Game`; // Sometimes consolation games have p
+                }
+
+                return { name, score, isPlaceholder, rosterId: rosterIdRef };
+            };
+
+            const t1 = getTeamInfo(match.t1);
+            const t2 = getTeamInfo(match.t2);
+
+            // Determine winner styling if match is complete (heuristic: both have scores, one is higher, and it's not a future week)
+            // Note: Sleeper updates bracket "w" and "l" fields when match is officially done.
+            const winnerId = match.w;
+            
+            return (
+                <div className="bg-gray-800 rounded-xl p-3 mb-3 border border-gray-700 shadow-sm relative">
+                    <div className="absolute top-2 right-2 text-[10px] text-gray-500 font-mono">M{match.m}</div>
+                    
+                    {/* Team 1 */}
+                    <div className={`flex justify-between items-center mb-2 pb-2 border-b border-gray-700/50 ${winnerId === t1.rosterId ? 'text-yellow-400' : 'text-gray-300'}`}>
+                        <span className={`text-sm ${winnerId === t1.rosterId ? 'font-bold' : 'font-medium'} truncate pr-2`}>
+                            {t1.name}
+                        </span>
+                        {!t1.isPlaceholder && (
+                            <span className="font-mono font-bold text-sm">
+                                {t1.score.toFixed(2)}
+                            </span>
+                        )}
+                    </div>
+
+                    {/* Team 2 */}
+                    <div className={`flex justify-between items-center ${winnerId === t2.rosterId ? 'text-yellow-400' : 'text-gray-300'}`}>
+                        <span className={`text-sm ${winnerId === t2.rosterId ? 'font-bold' : 'font-medium'} truncate pr-2`}>
+                            {t2.name}
+                        </span>
+                        {!t2.isPlaceholder && (
+                            <span className="font-mono font-bold text-sm">
+                                {t2.score.toFixed(2)}
+                            </span>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const BracketView = ({ bracket, data, playoffStartWeek, title }) => {
+            // Group by Round
+            const rounds = {};
+            bracket.forEach(match => {
+                if (!rounds[match.r]) rounds[match.r] = [];
+                rounds[match.r].push(match);
+            });
+
+            return (
+                <div className="space-y-6 px-1">
+                    {Object.keys(rounds).sort((a,b) => a-b).map(roundNum => (
+                        <div key={roundNum}>
+                            <h3 className="text-cyan-400 text-xs font-bold uppercase tracking-widest mb-3 pl-1">
+                                Round {roundNum} <span className="text-gray-600 ml-2"> // Week {playoffStartWeek + parseInt(roundNum) - 1}</span>
+                            </h3>
+                            <div className="grid grid-cols-1 gap-1">
+                                {rounds[roundNum].map(match => (
+                                    <BracketMatchup 
+                                        key={match.m} 
+                                        match={match} 
+                                        data={data}
+                                        playoffStartWeek={playoffStartWeek}
+                                    />
+                                ))}
+                            </div>
+                        </div>
+                    ))}
+                    {bracket.length === 0 && (
+                        <div className="text-center text-gray-500 py-10">No bracket data available.</div>
+                    )}
+                </div>
+            );
+        };
+
+        // --- Main App ---
         const App = () => {
-            const { data, loading, error, currentNflWeek, refresh } = useSleeperData();
+            const { data, brackets, leagueSettings, loading, error, currentNflWeek, refresh } = useSleeperData();
             const [view, setView] = useState('total');
 
+            // Determine Standings
             const standings = useMemo(() => {
                 if (loading || !data) return [];
+                // Only calculate standard standings if we are NOT in bracket view
+                if (view === 'bracket_winners' || view === 'bracket_losers') return [];
 
                 const scores = {};
-                // Initialize
-                Object.keys(TEAMS).forEach(id => {
-                    scores[id] = 0;
-                });
+                Object.keys(TEAMS).forEach(id => scores[id] = 0);
 
                 if (view === 'total') {
-                    // Sum weeks 1 through 17 (Sleeper returns 0 for future games, so this is safe)
-                    // This ensures "Season Total" includes the hidden regular season weeks
                     for (let w = 1; w <= 17; w++) {
                         if (data[w]) {
                             data[w].forEach(matchup => {
@@ -159,7 +285,6 @@
                         }
                     }
                 } else {
-                    // Single week view
                     const w = parseInt(view);
                     if (data[w]) {
                         data[w].forEach(matchup => {
@@ -177,18 +302,19 @@
                         points
                     }))
                     .sort((a, b) => b.points - a.points);
-
             }, [data, view, loading]);
 
             const handleViewChange = (e) => {
                 setView(e.target.value);
             };
 
+            const playoffStartWeek = leagueSettings?.settings?.playoff_week_start || 15;
+
             if (loading) {
                 return (
                     <div className="min-h-screen bg-black text-white flex flex-col items-center justify-center p-4">
                         <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-cyan-400 mb-4"></div>
-                        <p className="text-gray-400 animate-pulse">Loading Season Data...</p>
+                        <p className="text-gray-400 animate-pulse">Loading League Data...</p>
                     </div>
                 );
             }
@@ -196,17 +322,10 @@
             if (error) {
                 return (
                     <div className="min-h-screen bg-black text-white flex flex-col items-center justify-center p-6">
-                        <div className="text-red-500 mb-4">
-                            <IconAlert className="w-16 h-16" />
-                        </div>
+                        <IconAlert className="w-16 h-16 text-red-500 mb-4" />
                         <h2 className="text-xl font-bold mb-2">Oops!</h2>
                         <p className="text-gray-400 text-center mb-6">{error}</p>
-                        <button 
-                            onClick={refresh}
-                            className="px-6 py-3 bg-gray-800 rounded-full font-semibold hover:bg-gray-700 transition"
-                        >
-                            Try Again
-                        </button>
+                        <button onClick={refresh} className="px-6 py-3 bg-gray-800 rounded-full font-semibold hover:bg-gray-700 transition">Try Again</button>
                     </div>
                 );
             }
@@ -215,27 +334,26 @@
                 <div className="min-h-screen bg-black text-white font-sans selection:bg-cyan-500 selection:text-black pb-12">
                     <div className="max-w-md mx-auto min-h-screen flex flex-col relative">
                         
-                        {/* Header Card */}
-                        <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-b-3xl shadow-lg shadow-cyan-900/20 p-6 mb-6 border-b border-gray-800 sticky top-0 z-10 backdrop-blur-md bg-opacity-95">
+                        {/* Header */}
+                        <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-b-3xl shadow-lg shadow-cyan-900/20 p-6 mb-6 border-b border-gray-800 sticky top-0 z-20 backdrop-blur-md bg-opacity-95">
                             <div className="flex justify-between items-start mb-4">
                                 <div>
                                     <h4 className="text-gray-400 text-xs font-bold tracking-widest uppercase mb-1">
                                         2025 Season
                                     </h4>
                                     <h2 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 to-purple-500">
-                                        {view === 'total' ? 'Season Totals' : `Week ${view}`}
+                                        {view === 'total' ? 'Season Totals' : 
+                                         view === 'bracket_winners' ? 'Championship' :
+                                         view === 'bracket_losers' ? 'Toilet Bowl' :
+                                         `Week ${view}`}
                                     </h2>
                                 </div>
-                                <button 
-                                    onClick={refresh}
-                                    className="p-2 bg-gray-800 rounded-full hover:bg-gray-700 transition active:scale-95"
-                                    aria-label="Refresh Data"
-                                >
+                                <button onClick={refresh} className="p-2 bg-gray-800 rounded-full hover:bg-gray-700 transition active:scale-95">
                                     <IconRefresh className="w-4 h-4 text-gray-400" />
                                 </button>
                             </div>
 
-                            {/* Week Selector */}
+                            {/* Selector */}
                             <div className="relative">
                                 <select
                                     value={view}
@@ -243,14 +361,18 @@
                                     className="w-full appearance-none bg-gray-900 border border-gray-700 text-white py-3 px-4 pr-10 rounded-xl focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-transparent transition-all font-medium text-sm"
                                 >
                                     <option value="total">Season Total Points</option>
-                                    <optgroup label="Playoffs">
+                                    <optgroup label="Playoff Brackets">
+                                        <option value="bracket_winners">🏆 Championship Bracket</option>
+                                        <option value="bracket_losers">🚽 Toilet Bowl</option>
+                                    </optgroup>
+                                    <optgroup label="Weekly Scores">
                                         <option value="15">Week 15 (Playoffs Rd 1)</option>
                                         <option value="16">Week 16 (Semis)</option>
                                         <option value="17">Week 17 (Championship)</option>
                                     </optgroup>
                                 </select>
                                 <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-4 text-gray-400">
-                                    <IconCalendar className="w-4 h-4" />
+                                    {view.includes('bracket') ? <IconGitBranch className="w-4 h-4" /> : <IconCalendar className="w-4 h-4" />}
                                 </div>
                             </div>
                             
@@ -261,63 +383,66 @@
                             </div>
                         </div>
 
-                        {/* Standings List */}
-                        <div className="px-4 flex-1 space-y-3">
-                            {standings.map((team, index) => {
-                                const rank = index + 1;
-                                const isTop3 = rank <= 3;
-                                
-                                return (
-                                    <div 
-                                        key={team.rosterId}
-                                        className={`
-                                            relative overflow-hidden
-                                            flex items-center p-4 rounded-xl
-                                            transition-all duration-300 transform
-                                            ${isTop3 ? 'bg-gradient-to-r from-gray-800 to-gray-900 border border-yellow-500/20' : 'bg-gray-900 border border-gray-800'}
-                                            hover:scale-[1.02] hover:shadow-lg hover:shadow-purple-900/20
-                                        `}
-                                    >
-                                        {/* Rank Number */}
-                                        <div className="w-10 flex-shrink-0 flex items-center justify-center">
-                                            {rank === 1 ? (
-                                                <div className="text-yellow-400 drop-shadow-lg">
-                                                    <IconTrophy className="w-6 h-6" />
+                        {/* Content Area */}
+                        <div className="px-4 flex-1 pb-10">
+                            {view === 'bracket_winners' ? (
+                                <BracketView 
+                                    bracket={brackets.winners} 
+                                    data={data} 
+                                    playoffStartWeek={playoffStartWeek} 
+                                />
+                            ) : view === 'bracket_losers' ? (
+                                <BracketView 
+                                    bracket={brackets.losers} 
+                                    data={data} 
+                                    playoffStartWeek={playoffStartWeek} 
+                                />
+                            ) : (
+                                <div className="space-y-3">
+                                    {standings.map((team, index) => {
+                                        const rank = index + 1;
+                                        const isTop3 = rank <= 3;
+                                        return (
+                                            <div 
+                                                key={team.rosterId}
+                                                className={`
+                                                    relative overflow-hidden
+                                                    flex items-center p-4 rounded-xl
+                                                    transition-all duration-300 transform
+                                                    ${isTop3 ? 'bg-gradient-to-r from-gray-800 to-gray-900 border border-yellow-500/20' : 'bg-gray-900 border border-gray-800'}
+                                                    hover:scale-[1.02] hover:shadow-lg hover:shadow-purple-900/20
+                                                `}
+                                            >
+                                                {/* Rank */}
+                                                <div className="w-10 flex-shrink-0 flex items-center justify-center">
+                                                    {rank === 1 ? (
+                                                        <div className="text-yellow-400 drop-shadow-lg"><IconTrophy className="w-6 h-6" /></div>
+                                                    ) : (
+                                                        <span className={`text-xl font-bold ${rank === 2 ? 'text-gray-300' : rank === 3 ? 'text-amber-600' : 'text-gray-500'}`}>{rank}</span>
+                                                    )}
                                                 </div>
-                                            ) : (
-                                                <span 
-                                                    className={`text-xl font-bold ${
-                                                        rank === 2 ? 'text-gray-300' : 
-                                                        rank === 3 ? 'text-amber-600' : 'text-gray-500'
-                                                    }`}
-                                                >
-                                                    {rank}
-                                                </span>
-                                            )}
-                                        </div>
-
-                                        {/* Team Name */}
-                                        <div className="flex-grow pl-2 pr-4">
-                                            <h3 className={`font-semibold text-lg leading-tight ${isTop3 ? 'text-white' : 'text-gray-300'}`}>
-                                                {team.name}
-                                            </h3>
-                                        </div>
-
-                                        {/* Points */}
-                                        <div className="flex-shrink-0 text-right">
-                                            <span className="block font-mono font-bold text-lg text-white">
-                                                {team.points.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                            </span>
-                                            <span className="text-[10px] text-gray-500 uppercase tracking-wider font-semibold">PTS</span>
-                                        </div>
-                                        
-                                        {/* Subtle highlight for gold leader */}
-                                        {rank === 1 && (
-                                            <div className="absolute top-0 right-0 w-16 h-16 bg-yellow-400 opacity-5 rounded-bl-full pointer-events-none"></div>
-                                        )}
-                                    </div>
-                                );
-                            })}
+                                                {/* Team */}
+                                                <div className="flex-grow pl-2 pr-4">
+                                                    <h3 className={`font-semibold text-lg leading-tight ${isTop3 ? 'text-white' : 'text-gray-300'}`}>
+                                                        {team.name}
+                                                    </h3>
+                                                </div>
+                                                {/* Points */}
+                                                <div className="flex-shrink-0 text-right">
+                                                    <span className="block font-mono font-bold text-lg text-white">
+                                                        {team.points.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                    </span>
+                                                    <span className="text-[10px] text-gray-500 uppercase tracking-wider font-semibold">PTS</span>
+                                                </div>
+                                                {/* Decoration */}
+                                                {rank === 1 && (
+                                                    <div className="absolute top-0 right-0 w-16 h-16 bg-yellow-400 opacity-5 rounded-bl-full pointer-events-none"></div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
                         </div>
                         
                         <div className="py-8 text-center text-gray-700 text-xs">
